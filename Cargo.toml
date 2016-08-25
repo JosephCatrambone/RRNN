@@ -7,7 +7,8 @@ description = "A port of Andrej Karpathy's recurrent network code to Rust."
 [lib]
 name = "rrnn"
 path = "src/lib.rs"
-crate-type = ["staticlib"] # dylib, rlib, staticlib, and cdylib
+crate-type = ["dylib"] # dylib, rlib, staticlib, and cdylib
+# dylib for so.  staticlib for .a
 
 #[[bin]]
 #name = "trainer"
@@ -15,3 +16,7 @@ crate-type = ["staticlib"] # dylib, rlib, staticlib, and cdylib
 
 [dependencies]
 rand = "*"
+libc = "*"
+
+[features]
+expensive_tests = [] # For the sanity tests which might sometimes fail at random.  Useful for learning tests.

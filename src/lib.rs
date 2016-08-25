@@ -1,7 +1,10 @@
 
+extern crate libc;
 extern crate rand;
 
+use libc::{c_char, c_float};
 use std::f32;
+use std::ffi::CStr;
 use std::ops::*;
 use rand::Rng;
 // let mut rng = rand::thread_rng();
@@ -48,10 +51,12 @@ impl Matrix {
 	}
 
 	fn get(&self, row_y : usize, col_x : usize) -> f32 {
+		assert!(row_y >= 0 && row_y < self.rows && col_x >= 0 && col_x < self.columns);
 		self.data[col_x + row_y*self.columns] // x + y*width
 	}
 
 	fn set(&mut self, row_y : usize, col_x : usize, value : f32) {
+		assert!(row_y >= 0 && row_y < self.rows && col_x >= 0 && col_x < self.columns);
 		self.data[col_x + row_y*self.columns] = value;
 	}
 
@@ -62,26 +67,13 @@ impl Matrix {
 			data : vec![],
 		};
 
-		for i in 0..self.columns {
-			for j in 0..self.rows {
+		for j in 0..self.columns {
+			for i in 0..self.rows {
 				new_mat.data.push(self.get(i, j)); // We iterate ROW MAJOR across this and push it for column major access.
 			}
 		}
 
 		new_mat
-	}
-
-	fn transpose_i(&mut self) {
-		for i in 0..self.rows {
-			for j in i+1..self.columns {
-				let temp = self.get(i, j);
-				let ji = self.get(j, i);
-				{
-					self.set(i, j, ji);
-					self.set(j, i, temp);
-				}
-			}
-		}
 	}
 
 	fn element_unary_op(&self, f : Box<Fn(f32)->f32>) -> Matrix {
@@ -110,6 +102,9 @@ impl Matrix {
 	}
 
 	fn element_binary_op(&self, other : &Matrix, f : Box<Fn(f32, f32)->f32>) -> Matrix {
+		assert_eq!(self.rows, other.rows);
+		assert_eq!(self.columns, other.columns);
+
 		let mut new_mat = Matrix {
 			rows : self.rows,
 			columns : self.columns,
@@ -118,7 +113,7 @@ impl Matrix {
 
 		for i in 0..self.rows {
 			for j in 0..self.columns {
-				new_mat.set(i, j, f(self.get(i, j), other.get(i, j)));
+				new_mat.data.push(f(self.get(i, j), other.get(i, j)));
 			}
 		}
 
@@ -126,6 +121,9 @@ impl Matrix {
 	}
 
 	fn element_binary_op_i(&mut self, other : &Matrix, f : Box<Fn(f32, f32)->f32>) {
+		assert_eq!(self.rows, other.rows);
+		assert_eq!(self.columns, other.columns);
+
 		for i in 0..self.rows {
 			for j in 0..self.columns {
 				let v = f(self.get(i, j), other.get(i, j));
@@ -225,10 +223,8 @@ impl RNN {
 	}
 }
 
-fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) {
-
-	rnn.reset_hidden_state();
-
+fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f32, Matrix, Matrix, Matrix, Matrix, Matrix) {
+	// NOTE: No reset here.
 	// Forward pass.
 	/*
 		xs[t] = np.zeros((vocab_size,1)) # encode in 1-of-k representation
@@ -239,9 +235,8 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) {
 		loss += -np.log(ps[t][targets[t],0]) # softmax (cross-entropy loss)
 	*/
 	let mut output = rnn.step(&example); // Gives us ys.
-	let error : Vec<f32> = target.into_iter().zip(output.into_iter()).map(|d| { (d.1 - d.0) }).collect(); // Squared error?
-	let loss : f32 = error.into_iter().fold(0.0, |sum, difference| { sum + difference.powi(2) }); // Fold squared error together.
-	panic!("Start here.");
+	let error : Vec<f32> = target.into_iter().zip(output.into_iter()).map(|d| { d.1 - d.0 }).collect(); // Want this to be how far from the truth we are.  If out was [0.1, 0.9] and truth was [0.0, 1.0], this would be [0.1, -0.1]
+	let loss : f32 = error.clone().into_iter().fold(0.0, |sum, difference| { sum + difference.powi(2) }); // Fold squared error together.
 
 	// Backwards pass.
 	/*
@@ -264,11 +259,52 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) {
 			np.clip(dparam, -5, 5, out=dparam) # clip to mitigate exploding gradients
 		return loss, dWxh, dWhh, dWhy, dbh, dby, hs[len(inputs)-1]
 	*/
+	//println!("RNN State shapes: Wih: {} {}", rnn.weight_ih.rows, rnn.weight_ih.columns);
+	//println!("RNN State shapes: Whh: {} {}", rnn.weight_hh.rows, rnn.weight_hh.columns);
+	//println!("RNN State shapes: Who: {} {}", rnn.weight_ho.rows, rnn.weight_ho.columns);
+
+	let delta_y = Matrix::new_from_row(&error);
+	let delta_bias_y = Matrix::new_from_row(&error); // Also delta y.
+	//println!("Delta y shape: {} {}", delta_y.rows, delta_y.columns);
+	let delta_weight_hy = rnn.hidden_state.transpose().multiply(&delta_y);
+	//println!("Delta weight hy: {} {}", delta_weight_hy.rows, delta_weight_hy.columns);
 	
+	let delta_h = delta_y.multiply(&rnn.weight_ho.transpose());
+	//println!("Delta hidden: {} {}", delta_h.rows, delta_h.columns);
+
+	let delta_h_derivative = rnn.hidden_state.element_unary_op(Box::new(|x| { 1.0 - (x*x) })); // Splitting dhraw = (1 - hs[t]*hs[t]) * dh into two lines.
+	let delta_h_raw = rnn.hidden_state.element_binary_op(&delta_h, Box::new(|a,b| { a*b })); // TODO: op_i?
+	//println!("Delta hidden raw: {} {}", delta_h_raw.rows, delta_h_raw.columns);
+
+	let delta_bias_h = Matrix::new_from_row(&delta_h_raw.data); // Dimensino mismatch?
+	let x_in = Matrix::new_from_row(&example);
+	//println!("Dims for multiply: {}x{} and {}x{}", delta_h_raw.rows, delta_h_raw.columns, x_in.rows, x_in.columns);
+	let delta_weight_xh = x_in.transpose().multiply(&delta_h_raw);
+	//println!("Delta weight xh: {} {}", delta_weight_xh.rows, delta_weight_xh.columns);
+
+	let delta_weight_hh = rnn.hidden_state.transpose().multiply(&delta_h_raw);
+
+	// TODO: Clip weights.
+	return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
 }
 
-pub fn train_rnn(rnn : &mut RNN, iterations : usize, training_data : &[Vec<f32>], label_data : &[Vec<f32>]) {
-	
+pub fn train_rnn(rnn : &mut RNN, iterations : usize, learning_rate : f32, learning_decay : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>]) {
+	let mut lr = learning_rate;
+	for i in 0..iterations {
+		rnn.reset_hidden_state();
+		for (ex, target) in training_data.iter().zip(label_data.iter()) {
+			// Get the loss + errors.
+			let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
+			println!("Iteration {} - Loss {}", i, loss);
+			// Apply gradients.
+			rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b*lr}));
+			rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b*lr}));
+			rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b*lr}));
+			rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b*lr}));
+			rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b*lr}));
+		}
+		lr *= learning_decay;
+	}
 }
 
 #[no_mangle]
@@ -276,12 +312,41 @@ pub extern "C" fn test_method(foo : &str) {
 	println!("Got string: {}", foo);
 }
 
+#[no_mangle]
+pub extern "C" fn build_trained_rnn_from_corpus(corpus : *const c_char, delimiter : &str, learning_rate : f32, learning_decay : f32, hidden_layer_size : usize, verbose : bool) -> *mut RNN {
+	// Split up our corpus.
+	let strings = unsafe {
+		assert!(!corpus.is_null());
+		CStr::from_ptr(corpus);
+	};
+
+	// Train our RNN.
+	let mut rnn = RNN::new(26, hidden_layer_size);
+	
+	Box::into_raw(Box::new(rnn))
+}
+
+#[no_mangle]
+pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *const c_char) -> *mut c_float {
+	let rnn = unsafe {
+		assert!(!rnn_ptr.is_null());
+		&*rnn_ptr
+	};
+
+	let doc = unsafe {
+		assert!(!document.is_null());
+		CStr::from_ptr(document)
+	};
+
+	rnn.hidden_state.data.clone().as_mut_ptr()
+}
+
 //#[no_mangle]
 //pub extern "C" fn load_rnn(filename : &str)
 
 #[cfg(test)]
 mod tests {
-	use super::{Matrix, test_method, RNN};
+	use super::{Matrix, test_method, RNN, train_rnn, loss_function};
 
 	#[test]
 	fn test_ident() {
@@ -311,5 +376,17 @@ mod tests {
 		for i in 0..3*5 {
 			assert_eq!(c.data[i], 4.0); // ones * ones should all be 4.
 		}
+	}
+
+	#[test]
+	#[cfg_attr(not(feature="expensive_tests"), ignore)] // Run with `cargo test --features expensive_tests`
+	fn test_train_blink_sequence() {
+		let mut rnn = RNN::new(3, 2);
+		train_rnn(&mut rnn, 10000, 0.01, 1.0, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]);
+		//loss_function(&mut rnn, &vec![1.0, 0.0, 0.0], &vec![0.0, 1.0, 0.0]);
+		rnn.reset_hidden_state();
+		let next = rnn.step(&vec![1.0, 0.0, 0.0]);
+		println!("Next: {:?}", next);
+		assert!(next[0] < 0.1 && next[1] > 0.9 && next[2] < 0.1);
 	}
 }
