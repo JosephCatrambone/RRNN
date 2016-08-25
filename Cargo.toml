@@ -10,10 +10,6 @@ path = "src/lib.rs"
 crate-type = ["dylib"] # dylib, rlib, staticlib, and cdylib
 # dylib for so.  staticlib for .a
 
-#[[bin]]
-#name = "trainer"
-#path = "src/trainer.rs"
-
 [dependencies]
 rand = "*"
 libc = "*"

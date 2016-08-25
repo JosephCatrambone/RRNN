@@ -4,13 +4,15 @@ extern crate rand;
 
 use libc::{c_char, c_float};
 use std::f32;
-use std::ffi::CStr;
+use std::ffi::CString;
 use std::ops::*;
 use rand::Rng;
 // let mut rng = rand::thread_rng();
 // rng.gen() or rng.gen::<f32>() or rand::random::<(some tuple of values)>
 
-#[repr(C)]
+//
+// Matrix
+//
 pub struct Matrix {
 	rows : usize, // Height
 	columns : usize, // Width
@@ -47,7 +49,7 @@ impl Matrix {
 	}
 
 	fn new_random(num_rows : usize, num_cols : usize, scale : f32) -> Matrix {
-		Matrix::new_from_fn(num_rows, num_cols, Box::new(move |i,j| { rand::random::<f32>()*scale }))
+		Matrix::new_from_fn(num_rows, num_cols, Box::new(move |_,_| { rand::random::<f32>()*scale }))
 	}
 
 	fn get(&self, row_y : usize, col_x : usize) -> f32 {
@@ -154,15 +156,9 @@ impl Matrix {
 	}
 }
 
-/*
-impl Add for Matrix {
-	type Output = Matrix;
-
-	fn add(self, _rhs : Matrix) -> Matrix {
-	}
-}
-*/
-
+//
+// RNN
+//
 pub struct RNN {
 	weight_ih : Matrix,
 	weight_hh : Matrix,
@@ -288,65 +284,145 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f3
 	return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
 }
 
-pub fn train_rnn(rnn : &mut RNN, iterations : usize, learning_rate : f32, learning_decay : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>]) {
-	let mut lr = learning_rate;
-	for i in 0..iterations {
-		rnn.reset_hidden_state();
-		for (ex, target) in training_data.iter().zip(label_data.iter()) {
-			// Get the loss + errors.
-			let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
-			println!("Iteration {} - Loss {}", i, loss);
-			// Apply gradients.
-			rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b*lr}));
-			rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b*lr}));
-			rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b*lr}));
-			rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b*lr}));
-			rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b*lr}));
-		}
-		lr *= learning_decay;
+pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>]) {
+	let lr = learning_rate;
+	let mut step = 0;
+	rnn.reset_hidden_state();
+	for (ex, target) in training_data.iter().zip(label_data.iter()) {
+		// Get the loss + errors.
+		let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
+		println!("Step {} - Loss {}", step, loss);
+		// Apply gradients.
+		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b*lr}));
+		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b*lr}));
+		rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b*lr}));
+		rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b*lr}));
+		rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b*lr}));
+
+		step += 1;
 	}
+	//lr *= learning_decay;
+}
+
+//
+// BEGIN C API
+//
+const INPUT_SIZE : usize = 28; // 26 Letters, space, EOL.
+const SPACE_CHARACTER : usize = 26;
+const TERMINAL_CHARACTER : usize = 27;
+const ASCII_a : u8 = 97; // Lower-case is 97.
+const ASCII_z : u8 = 122;
+const ASCII_SPACE : u8 = 32;
+
+// Helpers.
+fn string_to_vector(s : &str) -> Vec<Vec<f32>> {
+	let mut result : Vec<Vec<f32>> = vec![];
+	for c in s.to_lowercase().as_bytes() {
+		let mut char_vector = vec![0.0f32; INPUT_SIZE];
+		if *c >= ASCII_a && *c <= ASCII_z {
+			char_vector[(c - ASCII_a) as usize] = 1.0;
+		} else if *c == ASCII_SPACE {
+			char_vector[SPACE_CHARACTER] = 1.0;
+		}
+		result.push(char_vector);
+	}
+	// Append the end of line marker.
+	let mut terminal_vector = vec![0.0f32; INPUT_SIZE];
+	terminal_vector[TERMINAL_CHARACTER] = 1.0;
+	result.push(terminal_vector);
+	result
+}
+
+/*
+fn vector_to_string(Vec<Vec<f32>>) -> String {
+	String::new("ayy lmao")
+}
+*/
+
+#[no_mangle]
+pub extern "C" fn test_method() {
+	println!("Shared library success!");
 }
 
 #[no_mangle]
-pub extern "C" fn test_method(foo : &str) {
-	println!("Got string: {}", foo);
-}
-
-#[no_mangle]
-pub extern "C" fn build_trained_rnn_from_corpus(corpus : *const c_char, delimiter : &str, learning_rate : f32, learning_decay : f32, hidden_layer_size : usize, verbose : bool) -> *mut RNN {
-	// Split up our corpus.
-	let strings = unsafe {
-		assert!(!corpus.is_null());
-		CStr::from_ptr(corpus);
-	};
-
+pub extern "C" fn build_rnn(hidden_layer_size : usize) -> *mut RNN {
 	// Train our RNN.
-	let mut rnn = RNN::new(26, hidden_layer_size);
+	let mut rnn = RNN::new(INPUT_SIZE, hidden_layer_size);
 	
 	Box::into_raw(Box::new(rnn))
 }
 
 #[no_mangle]
-pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *const c_char) -> *mut c_float {
+pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char, delimiter : char, iterations : u32, learning_rate : f32, learning_decay : f32, hidden_layer_size : usize, verbose : bool) {
 	let rnn = unsafe {
 		assert!(!rnn_ptr.is_null());
 		&*rnn_ptr
 	};
 
+	// Split up our corpus.
+	let strings : String = unsafe {
+		assert!(!corpus.is_null());
+		CString::from_raw(corpus) // use from_ptr(corpus) if CStr
+	}.into_string().unwrap();
+
+	panic!("Start working here.");
+	// 1. Method for splitting on newline?
+	// 2. Method which takes a sentence and produces an array of vec![] objects.
+	//"foo\rbar\nbaz\rquux".split('\n').flat_map(|x| x.split('\r')).collect::<Vec<_>>()	
+	for _ in 0..iterations {
+		for s in strings.split(delimiter) {
+			let training_sample = string_to_vector(&s);
+		}
+	}
+	
+	// TODO: Split corpus at newline.
+}
+
+#[no_mangle]
+pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *mut c_char, reset_rnn : bool) -> *mut c_float {
+	let mut rnn = unsafe {
+		assert!(!rnn_ptr.is_null());
+		&mut *rnn_ptr
+	};
+
 	let doc = unsafe {
 		assert!(!document.is_null());
-		CStr::from_ptr(document)
-	};
+		//CStr::from_ptr(document) // Or CStr, but we dont' want &str
+		CString::from_raw(document)
+	}.into_string().unwrap();
+
+	// Reset RNN.
+	if reset_rnn  {
+		rnn.reset_hidden_state();
+	}
+
+	// Process string.
 
 	rnn.hidden_state.data.clone().as_mut_ptr()
 }
 
-//#[no_mangle]
-//pub extern "C" fn load_rnn(filename : &str)
+#[no_mangle]
+pub extern "C" fn load_rnn(filename : &str) -> *mut RNN {
+	//let serialized = serde_json::to_string(&point).unwrap();
+	//println!("serialized = {}", serialized);
+	let new_rnn = RNN::new(1,1);
+	Box::into_raw(Box::new(new_rnn))
+}
 
+#[no_mangle]
+pub extern "C" fn free_rnn(rnn_ptr : *mut RNN) {
+	let rnn = unsafe {
+		if rnn_ptr.is_null() { return; }
+		&*rnn_ptr
+	};
+}
+
+//
+// TESTS
+//
 #[cfg(test)]
 mod tests {
-	use super::{Matrix, test_method, RNN, train_rnn, loss_function};
+	use super::{Matrix, test_method, RNN, train_sequence};
 
 	#[test]
 	fn test_ident() {
@@ -366,8 +442,8 @@ mod tests {
 		let mut a = Matrix::new(3, 4);
 		let mut b = Matrix::new(4, 5);
 
-		a.element_unary_op_i(Box::new(|x| { 1.0f32 })); // set all A to 1.
-		b.element_unary_op_i(Box::new(|x| { 1.0f32 })); // Set all B to 1.
+		a.element_unary_op_i(Box::new(|_| { 1.0f32 })); // set all A to 1.
+		b.element_unary_op_i(Box::new(|_| { 1.0f32 })); // Set all B to 1.
 
 		let c = a.multiply(&b);
 
@@ -382,7 +458,9 @@ mod tests {
 	#[cfg_attr(not(feature="expensive_tests"), ignore)] // Run with `cargo test --features expensive_tests`
 	fn test_train_blink_sequence() {
 		let mut rnn = RNN::new(3, 2);
-		train_rnn(&mut rnn, 10000, 0.01, 1.0, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]);
+		for _ in 0..10000 {
+			train_sequence(&mut rnn, 0.01, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]);
+		}
 		//loss_function(&mut rnn, &vec![1.0, 0.0, 0.0], &vec![0.0, 1.0, 0.0]);
 		rnn.reset_hidden_state();
 		let next = rnn.step(&vec![1.0, 0.0, 0.0]);
