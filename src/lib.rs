@@ -4,7 +4,7 @@ extern crate rand;
 
 use libc::{c_char, c_float};
 use std::f32;
-use std::ffi::CString;
+use std::ffi::CStr;
 use std::ops::*;
 use rand::Rng;
 // let mut rng = rand::thread_rng();
@@ -171,16 +171,15 @@ pub struct RNN {
 
 impl RNN {
 	fn new(input_size : usize, hidden_size : usize) -> RNN {
-		let mut rng = rand::thread_rng();
 		let scale : f32 = 0.1;
 		//let random_constructor = Box::new(|i,j| { let mut rng = rand::thread_rng(); rng.gen::<f32>()*0.1 });
 		RNN {
-			weight_ih : Matrix::new_random(input_size, hidden_size, 0.1f32),
-			weight_hh : Matrix::new_random(hidden_size, hidden_size, 0.1f32), 
-			weight_ho : Matrix::new_random(hidden_size, input_size, 0.1f32),
+			weight_ih : Matrix::new_random(input_size, hidden_size, scale),
+			weight_hh : Matrix::new_random(hidden_size, hidden_size, scale), 
+			weight_ho : Matrix::new_random(hidden_size, input_size, scale),
 			//weight_ho : Matrix { rows : hidden_size, columns : input_size, data : (0..hidden_size*input_size).into_iter().map(|x| { rng.gen::<f32>()*scale }).collect() },
-			bias_h : Matrix::new_random(1, hidden_size, 0.1f32),
-			bias_o : Matrix::new_random(1, input_size, 0.1f32),
+			bias_h : Matrix::new_random(1, hidden_size, scale),
+			bias_o : Matrix::new_random(1, input_size, scale),
 			hidden_state : Matrix { rows: 1, columns : hidden_size, data : vec![0.0; hidden_size] }
 		}
 	}
@@ -218,6 +217,15 @@ impl RNN {
 		result.data
 	}
 }
+
+/*
+impl Iterator for RNN {
+	type Item = Vec<f32>;
+
+	fn next(&mut self) -> Option<Vec<f32>> {
+	}
+}
+*/
 
 fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f32, Matrix, Matrix, Matrix, Matrix, Matrix) {
 	// NOTE: No reset here.
@@ -284,14 +292,16 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f3
 	return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
 }
 
-pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>]) {
+pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>], verbose : bool) {
 	let lr = learning_rate;
 	let mut step = 0;
 	rnn.reset_hidden_state();
 	for (ex, target) in training_data.iter().zip(label_data.iter()) {
 		// Get the loss + errors.
 		let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
-		println!("Step {} - Loss {}", step, loss);
+		if verbose {
+			println!("Step {} - Loss {}", step, loss);
+		}
 		// Apply gradients.
 		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b*lr}));
 		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b*lr}));
@@ -333,15 +343,31 @@ fn string_to_vector(s : &str) -> Vec<Vec<f32>> {
 	result
 }
 
-/*
-fn vector_to_string(Vec<Vec<f32>>) -> String {
-	String::new("ayy lmao")
-}
-*/
-
-#[no_mangle]
-pub extern "C" fn test_method() {
-	println!("Shared library success!");
+fn vector_to_string(v : Vec<Vec<f32>>) -> String {
+	let mut res = String::new();
+	// res.push("asdf")
+	for character_distribution in v.iter() {
+		// Randomly select from the distribution, assuming uniform.
+		let mut energy = rand::random::<f32>();
+		// For each of the entries in the distribution...
+		for (index, candidate) in character_distribution.iter().enumerate() {
+			// If the candidate energy is greater than this bump, lose that energy and continue.
+			if energy > *candidate {
+				energy -= *candidate;
+			} else {
+				// We have selected a character.
+				if index == SPACE_CHARACTER {
+					res.push(' ');
+				} else if index == TERMINAL_CHARACTER {
+					return res; // Break early.
+				} else {
+					res.push(std::char::from_u32((ASCII_a as usize + index) as u32).unwrap());
+				}
+				break;
+			}
+		}
+	}
+	res
 }
 
 #[no_mangle]
@@ -353,29 +379,29 @@ pub extern "C" fn build_rnn(hidden_layer_size : usize) -> *mut RNN {
 }
 
 #[no_mangle]
-pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char, delimiter : char, iterations : u32, learning_rate : f32, learning_decay : f32, hidden_layer_size : usize, verbose : bool) {
-	let rnn = unsafe {
+pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char, delimiter : char, iterations : u32, learning_rate : f32, learning_decay : f32, verbose : bool) {
+	let mut lr = learning_rate;
+
+	let mut rnn = unsafe {
 		assert!(!rnn_ptr.is_null());
-		&*rnn_ptr
+		&mut *rnn_ptr
 	};
 
 	// Split up our corpus.
-	let strings : String = unsafe {
+	let strings : &str = unsafe {
 		assert!(!corpus.is_null());
-		CString::from_raw(corpus) // use from_ptr(corpus) if CStr
-	}.into_string().unwrap();
+		CStr::from_ptr(corpus) // use from_raw(corpus) if CString
+	}.to_str().unwrap();
 
-	panic!("Start working here.");
-	// 1. Method for splitting on newline?
-	// 2. Method which takes a sentence and produces an array of vec![] objects.
 	//"foo\rbar\nbaz\rquux".split('\n').flat_map(|x| x.split('\r')).collect::<Vec<_>>()	
 	for _ in 0..iterations {
 		for s in strings.split(delimiter) {
 			let training_sample = string_to_vector(&s);
+			// Convert Vec<Vec<f32>> to &[Vec<f32>] for learning..
+			train_sequence(&mut rnn, lr, &training_sample[..], &training_sample[1..], verbose);
 		}
+		lr *= learning_decay;
 	}
-	
-	// TODO: Split corpus at newline.
 }
 
 #[no_mangle]
@@ -387,9 +413,9 @@ pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *mut c_char,
 
 	let doc = unsafe {
 		assert!(!document.is_null());
-		//CStr::from_ptr(document) // Or CStr, but we dont' want &str
-		CString::from_raw(document)
-	}.into_string().unwrap();
+		//CString::from_raw(document) // Or CStr, but we dont' want &str
+		CStr::from_ptr(document)
+	}.to_str().unwrap();
 
 	// Reset RNN.
 	if reset_rnn  {
@@ -397,7 +423,12 @@ pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *mut c_char,
 	}
 
 	// Process string.
+	let doc_vector = string_to_vector(&doc);
+	for v in doc_vector {
+		rnn.step(&v);
+	}
 
+	// Return hidden state.
 	rnn.hidden_state.data.clone().as_mut_ptr()
 }
 
@@ -422,7 +453,8 @@ pub extern "C" fn free_rnn(rnn_ptr : *mut RNN) {
 //
 #[cfg(test)]
 mod tests {
-	use super::{Matrix, test_method, RNN, train_sequence};
+	use super::{Matrix, RNN, train_sequence, vector_to_string, string_to_vector};
+	//use super::*;
 
 	#[test]
 	fn test_ident() {
@@ -459,12 +491,17 @@ mod tests {
 	fn test_train_blink_sequence() {
 		let mut rnn = RNN::new(3, 2);
 		for _ in 0..10000 {
-			train_sequence(&mut rnn, 0.01, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]]);
+			train_sequence(&mut rnn, 0.01, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]], true);
 		}
 		//loss_function(&mut rnn, &vec![1.0, 0.0, 0.0], &vec![0.0, 1.0, 0.0]);
 		rnn.reset_hidden_state();
 		let next = rnn.step(&vec![1.0, 0.0, 0.0]);
 		println!("Next: {:?}", next);
 		assert!(next[0] < 0.1 && next[1] > 0.9 && next[2] < 0.1);
+	}
+
+	#[test]
+	fn test_vector_conversion_sanity() {
+		assert_eq!("foo bar bez bum", vector_to_string(string_to_vector("foo bar bez bum")));
 	}
 }
