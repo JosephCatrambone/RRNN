@@ -5,7 +5,10 @@ extern crate rand;
 use libc::{c_char, c_float};
 use std::f32;
 use std::ffi::CStr;
+use std::mem; 
 use std::ops::*;
+use std::ptr;
+use std::slice;
 use rand::Rng;
 // let mut rng = rand::thread_rng();
 // rng.gen() or rng.gen::<f32>() or rand::random::<(some tuple of values)>
@@ -344,6 +347,7 @@ fn string_to_vector(s : &str) -> Vec<Vec<f32>> {
 }
 
 fn vector_to_string(v : Vec<Vec<f32>>) -> String {
+	const CHARS : [char;28] = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', ' ', '\0'];
 	let mut res = String::new();
 	// res.push("asdf")
 	for character_distribution in v.iter() {
@@ -355,13 +359,17 @@ fn vector_to_string(v : Vec<Vec<f32>>) -> String {
 			if energy > *candidate {
 				energy -= *candidate;
 			} else {
+				assert!(index >= 0 && index < CHARS.len());
 				// We have selected a character.
 				if index == SPACE_CHARACTER {
 					res.push(' ');
+					energy = 0.0;
 				} else if index == TERMINAL_CHARACTER {
 					return res; // Break early.
 				} else {
-					res.push(std::char::from_u32((ASCII_a as usize + index) as u32).unwrap());
+					//res.push(std::char::from_u32((ASCII_a as usize + index) as u32).unwrap());
+					res.push(CHARS[index]);
+					energy = 0.0;
 				}
 				break;
 			}
@@ -379,7 +387,7 @@ pub extern "C" fn build_rnn(hidden_layer_size : usize) -> *mut RNN {
 }
 
 #[no_mangle]
-pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char, delimiter : char, iterations : u32, learning_rate : f32, learning_decay : f32, verbose : bool) {
+pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *const c_char, delimiter : char, iterations : u32, learning_rate : f32, learning_decay : f32, verbose : bool) {
 	let mut lr = learning_rate;
 
 	let mut rnn = unsafe {
@@ -391,7 +399,7 @@ pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char
 	let strings : &str = unsafe {
 		assert!(!corpus.is_null());
 		CStr::from_ptr(corpus) // use from_raw(corpus) if CString
-	}.to_str().unwrap();
+	}.to_str().expect("Got bad value in corpus.");
 
 	//"foo\rbar\nbaz\rquux".split('\n').flat_map(|x| x.split('\r')).collect::<Vec<_>>()	
 	for _ in 0..iterations {
@@ -405,7 +413,39 @@ pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *mut c_char
 }
 
 #[no_mangle]
-pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *mut c_char, reset_rnn : bool) -> *mut c_float {
+pub extern "C" fn sample(rnn_ptr : *mut RNN, output_length : usize, result_buffer : *mut c_char) {
+	let mut rnn = unsafe {
+		assert!(!rnn_ptr.is_null());
+		&mut *rnn_ptr
+	};
+
+	// Start with an empty initialization vector and whatever is in RNN.
+	let initial_vector_size = rnn.weight_ih.rows;
+	let mut samples = Vec::<Vec<f32>>::new();
+	samples.push(rnn.step(&vec![0.0f32; initial_vector_size]));
+	for _ in 0..output_length {
+		let last_sample = samples.last().unwrap().clone();
+		samples.push(rnn.step(&last_sample));
+	}
+
+	// Convert our samples to a string.
+	let s = vector_to_string(samples);
+
+	// Copy the string into the target array.
+	unsafe {
+		ptr::copy_nonoverlapping(s.as_ptr() as *mut i8, result_buffer, output_length); // as_bytes_with_nul()?
+		/*
+		let mut raw_array = slice::from_raw_parts_mut(result_buffer, output_length);
+		for (i, chr) in s.bytes().enumerate() {
+			raw_array[i] = chr as i8;
+		}
+		mem::forget(raw_array); // To prevent freeing?
+		*/
+	}
+}
+
+#[no_mangle]
+pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *const c_char, reset_rnn : bool, target_output : *mut c_float) {
 	let mut rnn = unsafe {
 		assert!(!rnn_ptr.is_null());
 		&mut *rnn_ptr
@@ -429,7 +469,13 @@ pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *mut c_char,
 	}
 
 	// Return hidden state.
-	rnn.hidden_state.data.clone().as_mut_ptr()
+	unsafe {
+		let mut raw_array = slice::from_raw_parts_mut(target_output, rnn.hidden_state.data.len());
+		for i in 0..rnn.hidden_state.data.len() {
+			raw_array[i] = rnn.hidden_state.data[i];
+		}
+		mem::forget(raw_array); // To prevent freeing?
+	}
 }
 
 #[no_mangle]
