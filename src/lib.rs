@@ -366,12 +366,6 @@ pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec
 	let mut mem_bo = 0.0f32;
 	let mut smooth_loss = 0.0f32;
 
-	let mut dwih_accum = rnn.weight_ih.clone();
-	let mut dwhh_accum = rnn.weight_hh.clone();
-	let mut dwho_accum = rnn.weight_ho.clone();
-	let mut dbh_accum = rnn.bias_h.clone();
-	let mut dbo_accum = rnn.bias_o.clone();
-
 	for (ex, target) in training_data.iter().zip(label_data.iter()) {
 		// Get the loss + errors.
 		let (loss, mut dwih, mut dwhh, mut dwho, mut dbh, mut dbo) = loss_function(rnn, ex, target);
@@ -398,20 +392,15 @@ pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec
 		for v in &dwho.data { mem_who += v*v; }
 		for v in &dbh.data { mem_bh += v*v; }
 		for v in &dbo.data { mem_bo += v*v; }
-		// Apply gradients here?  Seems to work better for some cases.  Instead, we accumulate?
-		dwih_accum.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b}));
-		dwhh_accum.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b}));
-		dwho_accum.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b}));
-		dbh_accum.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b}));
-		dbo_accum.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b}));
+		// Apply gradients.
+		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_wih.clone().sqrt()))}));
+		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_whh.clone().sqrt()))}));
+		rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_who.clone().sqrt()))}));
+		rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bh.clone().sqrt()))}));
+		rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bo.clone().sqrt()))}));
 
 		step += 1;
 	}
-	rnn.weight_ih.element_binary_op_i(&dwih_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_wih.clone().sqrt()))}));
-	rnn.weight_hh.element_binary_op_i(&dwhh_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_whh.clone().sqrt()))}));
-	rnn.weight_ho.element_binary_op_i(&dwho_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_who.clone().sqrt()))}));
-	rnn.bias_h.element_binary_op_i(&dbh_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bh.clone().sqrt()))}));
-	rnn.bias_o.element_binary_op_i(&dbo_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bo.clone().sqrt()))}));
 	//lr *= learning_decay;
 }
 
