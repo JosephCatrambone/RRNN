@@ -351,15 +351,9 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f3
 	//println!("Delta weight xh: {} {}", delta_weight_xh.rows, delta_weight_xh.columns);
 
 	let delta_weight_hh = rnn.hidden_state.transpose().multiply(&delta_h_raw);
-
-	// Weight clipping to keep from going crazy.
-	let delta_weight_xh_clipped = Matrix::new_from_fn(delta_weight_xh.rows, delta_weight_xh.columns, Box::new(move |i, j| { if delta_weight_xh.get(i, j) < -5.0f32 || delta_weight_xh.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_xh.get(i, j) } } ) );
-	let delta_weight_hh_clipped = Matrix::new_from_fn(delta_weight_hh.rows, delta_weight_hh.columns, Box::new(move |i, j| { if delta_weight_hh.get(i, j) < -5.0f32 || delta_weight_hh.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_hh.get(i, j) } } ) );
-	let delta_weight_hy_clipped = Matrix::new_from_fn(delta_weight_hy.rows, delta_weight_hy.columns, Box::new(move |i, j| { if delta_weight_hy.get(i, j) < -5.0f32 || delta_weight_hy.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_hy.get(i, j) } } ) );
 	
 	// Return final values.
-	//return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
-	return (loss, delta_weight_xh_clipped, delta_weight_hh_clipped, delta_weight_hy_clipped, delta_bias_h, delta_bias_y);
+	return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
 }
 
 pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>], verbose : bool) {
@@ -372,13 +366,27 @@ pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec
 	let mut mem_bo = 0.0f32;
 	let mut smooth_loss = 0.0f32;
 
+	let mut dwih_accum = rnn.weight_ih.clone();
+	let mut dwhh_accum = rnn.weight_hh.clone();
+	let mut dwho_accum = rnn.weight_ho.clone();
+	let mut dbh_accum = rnn.bias_h.clone();
+	let mut dbo_accum = rnn.bias_o.clone();
+
 	for (ex, target) in training_data.iter().zip(label_data.iter()) {
 		// Get the loss + errors.
-		let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
+		let (loss, mut dwih, mut dwhh, mut dwho, mut dbh, mut dbo) = loss_function(rnn, ex, target);
 		smooth_loss = 0.99 * smooth_loss + 0.01 * loss;
 		if verbose {
 			println!("Step {} - Loss {} - Smooth loss: {}", step, loss, smooth_loss);
 		}
+
+		// Weight clipping to keep from going crazy.
+		dwih.element_unary_op_i(Box::new(|x| { if x < -5.0f32 { -5.0f32 } else if x > 5.0f32 { 5.0f32 } else { x } } ) );
+		dwhh.element_unary_op_i(Box::new(|x| { if x < -5.0f32 { -5.0f32 } else if x > 5.0f32 { 5.0f32 } else { x } } ) );
+		dwho.element_unary_op_i(Box::new(|x| { if x < -5.0f32 { -5.0f32 } else if x > 5.0f32 { 5.0f32 } else { x } } ) );
+		dbh.element_unary_op_i(Box::new(|x| { if x < -5.0f32 { -5.0f32 } else if x > 5.0f32 { 5.0f32 } else { x } } ) );
+		dbo.element_unary_op_i(Box::new(|x| { if x < -5.0f32 { -5.0f32 } else if x > 5.0f32 { 5.0f32 } else { x } } ) );
+
 		/*
 		for param, dparam, mem in zip([Wxh, Whh, Why, bh, by], [dWxh, dWhh, dWhy, dbh, dby], [mWxh, mWhh, mWhy, mbh, mby]):
 			mem += dparam * dparam
@@ -390,15 +398,20 @@ pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec
 		for v in &dwho.data { mem_who += v*v; }
 		for v in &dbh.data { mem_bh += v*v; }
 		for v in &dbo.data { mem_bo += v*v; }
-		// Apply gradients.
-		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_wih.clone().sqrt()))}));
-		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_whh.clone().sqrt()))}));
-		rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_who.clone().sqrt()))}));
-		rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bh.clone().sqrt()))}));
-		rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bo.clone().sqrt()))}));
+		// Apply gradients here?  Seems to work better for some cases.  Instead, we accumulate?
+		dwih_accum.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b}));
+		dwhh_accum.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b}));
+		dwho_accum.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b}));
+		dbh_accum.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b}));
+		dbo_accum.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b}));
 
 		step += 1;
 	}
+	rnn.weight_ih.element_binary_op_i(&dwih_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_wih.clone().sqrt()))}));
+	rnn.weight_hh.element_binary_op_i(&dwhh_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_whh.clone().sqrt()))}));
+	rnn.weight_ho.element_binary_op_i(&dwho_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_who.clone().sqrt()))}));
+	rnn.bias_h.element_binary_op_i(&dbh_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bh.clone().sqrt()))}));
+	rnn.bias_o.element_binary_op_i(&dbo_accum, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bo.clone().sqrt()))}));
 	//lr *= learning_decay;
 }
 
@@ -437,7 +450,8 @@ fn vector_to_string(v : Vec<Vec<f32>>) -> String {
 	// res.push("asdf")
 	for character_distribution in v.iter() {
 		// Randomly select from the distribution, assuming uniform.
-		let mut energy = rand::random::<f32>();
+		let total_energy = character_distribution.iter().fold(0.0f32, |sum, x| { sum + x });
+		let mut energy = rand::random::<f32>() * total_energy;
 		// For each of the entries in the distribution...
 		for (index, candidate) in character_distribution.iter().enumerate() {
 			// If the candidate energy is greater than this bump, lose that energy and continue.
