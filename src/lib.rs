@@ -3,12 +3,17 @@ extern crate libc;
 extern crate rand;
 
 use libc::{c_char, c_float};
+use std::cmp;
 use std::f32;
 use std::ffi::CStr;
+use std::fmt;
+use std::fs::File;
+use std::io::prelude::*;
 use std::mem; 
 use std::ops::*;
 use std::ptr;
 use std::slice;
+use std::str::FromStr;
 use rand::Rng;
 // let mut rng = rand::thread_rng();
 // rng.gen() or rng.gen::<f32>() or rand::random::<(some tuple of values)>
@@ -20,6 +25,16 @@ pub struct Matrix {
 	rows : usize, // Height
 	columns : usize, // Width
 	data : Vec<f32>,
+}
+
+impl Clone for Matrix {
+	fn clone(&self) -> Matrix {
+		Matrix {
+			rows : self.rows,
+			columns : self.columns,
+			data : self.data.clone()
+		}
+	}
 }
 
 impl Matrix {
@@ -158,10 +173,37 @@ impl Matrix {
 		new_mat
 	}
 }
+/*
+impl fmt::Display for Matrix {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, "{} {} ", self.rows, self.columns);
+		for i in 0..self.data.len() {
+			write!(f, "{} ", self.data[i]);
+		}
+		write!(f, "\n")
+	}
+}
+*/
+
+impl FromStr for Matrix { // Given a matrix in the above format.
+	type Err = ();
+	fn from_str(s : &str) -> Result<Matrix, Self::Err> {
+		let mut s_iter = s.split(" ");
+		let rows = usize::from_str(s_iter.next().unwrap()).unwrap();
+		let columns = usize::from_str(s_iter.next().unwrap()).unwrap();
+		let mut data = vec![];
+		for v in s_iter {
+			data.push(f32::from_str(v).unwrap());
+		}
+		let new_mat = Matrix { rows : rows, columns : columns, data : data };
+		Ok(new_mat)
+	}
+}
 
 //
 // RNN
 //
+#[derive(Clone)]
 pub struct RNN {
 	weight_ih : Matrix,
 	weight_hh : Matrix,
@@ -219,8 +261,27 @@ impl RNN {
 		result.element_binary_op_i(&self.bias_o, Box::new(|a, b|{a+b}));
 		result.data
 	}
-}
 
+	fn get_last_output(&self) -> Vec<f32> {
+		let mut result = self.hidden_state.multiply(&self.weight_ho);
+		result.element_binary_op_i(&self.bias_o, Box::new(|a, b|{a+b}));
+		result.data
+	}
+}
+/*
+impl fmt::Display for RNN {
+	fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+		write!(f, 
+			"{}\n{}\n{}\n{}\n{}",
+			self.weight_ih,
+			self.weight_hh,
+			self.weight_ho,
+			self.bias_h,
+			self.bias_o
+		)
+	}
+}
+*/
 /*
 impl Iterator for RNN {
 	type Item = Vec<f32>;
@@ -291,26 +352,50 @@ fn loss_function(rnn : &mut RNN, example : &Vec<f32>, target : &Vec<f32>) -> (f3
 
 	let delta_weight_hh = rnn.hidden_state.transpose().multiply(&delta_h_raw);
 
-	// TODO: Clip weights.
-	return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
+	// Weight clipping to keep from going crazy.
+	let delta_weight_xh_clipped = Matrix::new_from_fn(delta_weight_xh.rows, delta_weight_xh.columns, Box::new(move |i, j| { if delta_weight_xh.get(i, j) < -5.0f32 || delta_weight_xh.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_xh.get(i, j) } } ) );
+	let delta_weight_hh_clipped = Matrix::new_from_fn(delta_weight_hh.rows, delta_weight_hh.columns, Box::new(move |i, j| { if delta_weight_hh.get(i, j) < -5.0f32 || delta_weight_hh.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_hh.get(i, j) } } ) );
+	let delta_weight_hy_clipped = Matrix::new_from_fn(delta_weight_hy.rows, delta_weight_hy.columns, Box::new(move |i, j| { if delta_weight_hy.get(i, j) < -5.0f32 || delta_weight_hy.get(i, j) > 5.0f32 { 0.0f32 } else { delta_weight_hy.get(i, j) } } ) );
+	
+	// Return final values.
+	//return (loss, delta_weight_xh, delta_weight_hh, delta_weight_hy, delta_bias_h, delta_bias_y);
+	return (loss, delta_weight_xh_clipped, delta_weight_hh_clipped, delta_weight_hy_clipped, delta_bias_h, delta_bias_y);
 }
 
 pub fn train_sequence(rnn : &mut RNN, learning_rate : f32, training_data : &[Vec<f32>], label_data : &[Vec<f32>], verbose : bool) {
 	let lr = learning_rate;
 	let mut step = 0;
-	rnn.reset_hidden_state();
+	let mut mem_wih = 0.0f32;
+	let mut mem_whh = 0.0f32;
+	let mut mem_who = 0.0f32;
+	let mut mem_bh = 0.0f32;
+	let mut mem_bo = 0.0f32;
+	let mut smooth_loss = 0.0f32;
+
 	for (ex, target) in training_data.iter().zip(label_data.iter()) {
 		// Get the loss + errors.
 		let (loss, dwih, dwhh, dwho, dbh, dbo) = loss_function(rnn, ex, target);
+		smooth_loss = 0.99 * smooth_loss + 0.01 * loss;
 		if verbose {
-			println!("Step {} - Loss {}", step, loss);
+			println!("Step {} - Loss {} - Smooth loss: {}", step, loss, smooth_loss);
 		}
+		/*
+		for param, dparam, mem in zip([Wxh, Whh, Why, bh, by], [dWxh, dWhh, dWhy, dbh, dby], [mWxh, mWhh, mWhy, mbh, mby]):
+			mem += dparam * dparam
+			param += -learning_rate * dparam / np.sqrt(mem + 1e-8) # adagrad update
+		*/
+		// Calculate the squared magnitude of all the weight update parameters.
+		for v in &dwih.data { mem_wih += v*v; }
+		for v in &dwhh.data { mem_whh += v*v; }
+		for v in &dwho.data { mem_who += v*v; }
+		for v in &dbh.data { mem_bh += v*v; }
+		for v in &dbo.data { mem_bo += v*v; }
 		// Apply gradients.
-		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - b*lr}));
-		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - b*lr}));
-		rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - b*lr}));
-		rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - b*lr}));
-		rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - b*lr}));
+		rnn.weight_ih.element_binary_op_i(&dwih, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_wih.clone().sqrt()))}));
+		rnn.weight_hh.element_binary_op_i(&dwhh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_whh.clone().sqrt()))}));
+		rnn.weight_ho.element_binary_op_i(&dwho, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_who.clone().sqrt()))}));
+		rnn.bias_h.element_binary_op_i(&dbh, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bh.clone().sqrt()))}));
+		rnn.bias_o.element_binary_op_i(&dbo, Box::new(move |a, b|{a - (b*lr/(1.0e-8 + mem_bo.clone().sqrt()))}));
 
 		step += 1;
 	}
@@ -361,10 +446,7 @@ fn vector_to_string(v : Vec<Vec<f32>>) -> String {
 			} else {
 				assert!(index >= 0 && index < CHARS.len());
 				// We have selected a character.
-				if index == SPACE_CHARACTER {
-					res.push(' ');
-					energy = 0.0;
-				} else if index == TERMINAL_CHARACTER {
+				if index == TERMINAL_CHARACTER {
 					return res; // Break early.
 				} else {
 					//res.push(std::char::from_u32((ASCII_a as usize + index) as u32).unwrap());
@@ -404,8 +486,12 @@ pub extern "C" fn train_rnn_with_corpus(rnn_ptr : *mut RNN, corpus : *const c_ch
 	//"foo\rbar\nbaz\rquux".split('\n').flat_map(|x| x.split('\r')).collect::<Vec<_>>()	
 	for _ in 0..iterations {
 		for s in strings.split(delimiter) {
+			if verbose {
+				println!("Training sample: '{}'", &s);
+			}
 			let training_sample = string_to_vector(&s);
 			// Convert Vec<Vec<f32>> to &[Vec<f32>] for learning..
+			rnn.reset_hidden_state();
 			train_sequence(&mut rnn, lr, &training_sample[..], &training_sample[1..], verbose);
 		}
 		lr *= learning_decay;
@@ -422,7 +508,7 @@ pub extern "C" fn sample(rnn_ptr : *mut RNN, output_length : usize, result_buffe
 	// Start with an empty initialization vector and whatever is in RNN.
 	let initial_vector_size = rnn.weight_ih.rows;
 	let mut samples = Vec::<Vec<f32>>::new();
-	samples.push(rnn.step(&vec![0.0f32; initial_vector_size]));
+	samples.push(rnn.get_last_output());
 	for _ in 0..output_length {
 		let last_sample = samples.last().unwrap().clone();
 		samples.push(rnn.step(&last_sample));
@@ -433,7 +519,7 @@ pub extern "C" fn sample(rnn_ptr : *mut RNN, output_length : usize, result_buffe
 
 	// Copy the string into the target array.
 	unsafe {
-		ptr::copy_nonoverlapping(s.as_ptr() as *mut i8, result_buffer, output_length); // as_bytes_with_nul()?
+		ptr::copy_nonoverlapping(s.as_ptr() as *mut i8, result_buffer, cmp::min(s.len(), output_length)); // as_bytes_with_nul()?
 		/*
 		let mut raw_array = slice::from_raw_parts_mut(result_buffer, output_length);
 		for (i, chr) in s.bytes().enumerate() {
@@ -487,6 +573,16 @@ pub extern "C" fn load_rnn(filename : &str) -> *mut RNN {
 }
 
 #[no_mangle]
+pub extern "C" fn save_rnn(rnn_ptr : *mut RNN, filename : &str) {
+	let rnn = unsafe {
+		assert!(!rnn_ptr.is_null());
+		&mut *rnn_ptr;
+	};
+	//let mut f = try!(File::create(filename));
+	//try!(f.write_all(format!("{}", rnn)));
+}
+
+#[no_mangle]
 pub extern "C" fn free_rnn(rnn_ptr : *mut RNN) {
 	let rnn = unsafe {
 		if rnn_ptr.is_null() { return; }
@@ -537,6 +633,7 @@ mod tests {
 	fn test_train_blink_sequence() {
 		let mut rnn = RNN::new(3, 2);
 		for _ in 0..10000 {
+			rnn.reset_hidden_state();
 			train_sequence(&mut rnn, 0.01, &[vec![1.0, 0.0, 0.0], vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0]], &[vec![0.0, 1.0, 0.0], vec![0.0, 0.0, 1.0], vec![1.0, 0.0, 0.0]], true);
 		}
 		//loss_function(&mut rnn, &vec![1.0, 0.0, 0.0], &vec![0.0, 1.0, 0.0]);
@@ -544,6 +641,23 @@ mod tests {
 		let next = rnn.step(&vec![1.0, 0.0, 0.0]);
 		println!("Next: {:?}", next);
 		assert!(next[0] < 0.1 && next[1] > 0.9 && next[2] < 0.1);
+	}
+
+	#[test]
+	#[cfg_attr(not(feature="expensive_tests"), ignore)] // Run with `cargo test --features expensive_tests`
+	fn test_train_test_sequence() {
+		let mut rnn = RNN::new(28, 10);
+		let training_vector = string_to_vector("test");
+		for _ in 0..10000 {
+			rnn.reset_hidden_state();
+			train_sequence(&mut rnn, 0.01, &training_vector[..], &training_vector[1..], true);
+		}
+		//loss_function(&mut rnn, &vec![1.0, 0.0, 0.0], &vec![0.0, 1.0, 0.0]);
+		rnn.reset_hidden_state();
+		let next = rnn.step(&string_to_vector("t")[0]);
+		let st = vector_to_string(vec![next.clone()]);
+		println!("Next: {:?} {:}", next, st);
+		assert_eq!(st, "e");
 	}
 
 	#[test]
