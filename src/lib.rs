@@ -15,12 +15,18 @@ use std::ptr;
 use std::slice;
 use std::str::FromStr;
 use rand::Rng;
+
+// For serializing.  TODO: Deprecate and replace.
+extern crate rustc_serialize;
+use rustc_serialize::json;
+
 // let mut rng = rand::thread_rng();
 // rng.gen() or rng.gen::<f32>() or rand::random::<(some tuple of values)>
 
 //
 // Matrix
 //
+#[derive(RustcDecodable, RustcEncodable)]
 pub struct Matrix {
 	rows : usize, // Height
 	columns : usize, // Width
@@ -203,7 +209,7 @@ impl FromStr for Matrix { // Given a matrix in the above format.
 //
 // RNN
 //
-#[derive(Clone)]
+#[derive(Clone, RustcDecodable, RustcEncodable)]
 pub struct RNN {
 	weight_ih : Matrix,
 	weight_hh : Matrix,
@@ -568,21 +574,33 @@ pub extern "C" fn transform_document(rnn_ptr : *mut RNN, document : *const c_cha
 }
 
 #[no_mangle]
-pub extern "C" fn load_rnn(filename : &str) -> *mut RNN {
-	//let serialized = serde_json::to_string(&point).unwrap();
-	//println!("serialized = {}", serialized);
-	let new_rnn = RNN::new(1,1);
+pub extern "C" fn load_rnn(c_filename : *const c_char) -> *mut RNN {
+	let filename = unsafe {
+		CStr::from_ptr(c_filename)
+	}.to_str().unwrap();
+
+	let mut f = File::open(filename).expect("Invalid filename provided to load_rnn.");
+	let mut rnn_string = String::new();
+	f.read_to_string(&mut rnn_string).expect("Problem reading from file.");
+	let new_rnn : RNN = json::decode(&rnn_string).unwrap();
+
 	Box::into_raw(Box::new(new_rnn))
 }
 
 #[no_mangle]
-pub extern "C" fn save_rnn(rnn_ptr : *mut RNN, filename : &str) {
-	let rnn = unsafe {
+pub extern "C" fn save_rnn(rnn_ptr : *const RNN, c_filename : *const c_char) {
+	let rnn : &RNN = unsafe {
 		assert!(!rnn_ptr.is_null());
-		&mut *rnn_ptr;
+		& *rnn_ptr
 	};
-	//let mut f = try!(File::create(filename));
-	//try!(f.write_all(format!("{}", rnn)));
+
+	let filename = unsafe {
+		CStr::from_ptr(c_filename)
+	}.to_str().unwrap();
+
+	let mut f = File::create(filename).expect("Error opening file for write in save_rnn.");
+	let rnn_string = json::encode(&rnn).expect("Critical problem encoding RNN into JSON.  Please report this bug.");
+	f.write_all(&rnn_string.as_bytes()).expect("Problem writing to output file.");
 }
 
 #[no_mangle]
@@ -599,6 +617,7 @@ pub extern "C" fn free_rnn(rnn_ptr : *mut RNN) {
 #[cfg(test)]
 mod tests {
 	use super::{Matrix, RNN, train_sequence, vector_to_string, string_to_vector};
+	use rustc_serialize::json;
 	//use super::*;
 
 	#[test]
@@ -666,5 +685,21 @@ mod tests {
 	#[test]
 	fn test_vector_conversion_sanity() {
 		assert_eq!("foo bar bez bum", vector_to_string(string_to_vector("foo bar bez bum")));
+	}
+
+	#[test]
+	fn test_json_encode_decode_sanity() {
+		let rnn = RNN::new(12, 34);
+		let rnn_str = json::encode(&rnn).unwrap();
+		let rnn2 : RNN = json::decode(&rnn_str).unwrap();
+		assert_eq!(rnn.weight_ih.rows, rnn2.weight_ih.rows);
+		assert_eq!(rnn.weight_ih.columns, rnn2.weight_ih.columns);
+		assert!(rnn.weight_ih.data == rnn2.weight_ih.data);
+		assert_eq!(rnn.weight_hh.rows, rnn2.weight_hh.rows);
+		assert_eq!(rnn.weight_hh.columns, rnn2.weight_hh.columns);
+		assert!(rnn.weight_hh.data == rnn2.weight_hh.data);
+		assert_eq!(rnn.weight_ho.rows, rnn2.weight_ho.rows);
+		assert_eq!(rnn.weight_ho.columns, rnn2.weight_ho.columns);
+		assert!(rnn.weight_ho.data == rnn2.weight_ho.data);
 	}
 }
